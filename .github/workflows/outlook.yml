@@ -1,12 +1,11 @@
 name: Generate Message Trace Logs
 
 on:
-  # Schedule trigger using POSIX cron syntax (UTC time)
   schedule:
     # Runs every 6 hours (at minute 0 of hour 0, 6, 12, 18 UTC)
     - cron: '0 */6 * * *'
-  
-  # Allows you to manually trigger the workflow from the Actions tab anytime
+
+  # Allows manual triggers from the Actions tab
   workflow_dispatch:
     inputs:
       message_count:
@@ -38,7 +37,8 @@ jobs:
           MS_CLIENT_ID: ${{ secrets.MS_CLIENT_ID }}
           MS_CLIENT_SECRET: ${{ secrets.MS_CLIENT_SECRET }}
           MS_MAILBOX: ${{ secrets.MS_MAILBOX }}
+          # Pass optional recipient secret if defined, otherwise empty
+          MS_RECIPIENT: ${{ secrets.MS_RECIPIENT }}
         run: |
-          # Use manual input if triggered manually, otherwise default to 30
           COUNT="${{ github.event.inputs.message_count || '30' }}"
           python outlook.py $COUNT

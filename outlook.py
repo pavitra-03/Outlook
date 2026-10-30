@@ -1,8 +1,9 @@
 import os
 import sys
 import time
+import uuid
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ============================================================
 # CONFIGURATION
@@ -15,12 +16,9 @@ CLIENT_SECRET = os.getenv("MS_CLIENT_SECRET")
 MAILBOX = os.getenv("MS_MAILBOX")
 
 # Number of emails to generate.
-# Can be overridden from command line:
-# py generate_message_trace_logs.py 1000
 COUNT = int(sys.argv[1]) if len(sys.argv) > 1 else 30
 
-# Keep below Exchange Online's documented 30 messages/minute
-# per-user message rate.
+# Keep below Exchange Online's documented 30 messages/minute per-user message rate.
 MESSAGES_PER_MINUTE = 25
 
 # Calculate delay between messages.
@@ -54,10 +52,7 @@ if missing:
 # GET APPLICATION TOKEN
 # ============================================================
 
-token_url = (
-    f"https://login.microsoftonline.com/"
-    f"{TENANT_ID}/oauth2/v2.0/token"
-)
+token_url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
 
 token_data = {
     "client_id": CLIENT_ID,
@@ -68,11 +63,7 @@ token_data = {
 
 print("Requesting Microsoft Graph access token...")
 
-token_response = requests.post(
-    token_url,
-    data=token_data,
-    timeout=30
-)
+token_response = requests.post(token_url, data=token_data, timeout=30)
 
 if token_response.status_code != 200:
     print("Failed to obtain access token.")
@@ -81,17 +72,13 @@ if token_response.status_code != 200:
     sys.exit(1)
 
 access_token = token_response.json()["access_token"]
-
 print("Access token obtained successfully.")
 
 # ============================================================
 # GRAPH SENDMAIL
 # ============================================================
 
-send_url = (
-    f"https://graph.microsoft.com/v1.0/"
-    f"users/{MAILBOX}/sendMail"
-)
+send_url = f"https://graph.microsoft.com/v1.0/users/{MAILBOX}/sendMail"
 
 headers = {
     "Authorization": f"Bearer {access_token}",
@@ -100,7 +87,7 @@ headers = {
 
 print()
 print("==========================================")
-print("Message Trace Log Generator")
+print("Message Trace Log Generator (Unique Emails)")
 print("==========================================")
 print(f"Mailbox       : {MAILBOX}")
 print(f"Recipient     : {RECIPIENT}")
@@ -114,8 +101,13 @@ successful = 0
 failed = 0
 
 for i in range(1, COUNT + 1):
-
-    subject = f"{SUBJECT_PREFIX} {i:04d}"
+    # 1. Generate unique identifiers for each message
+    unique_id = str(uuid.uuid4())
+    timestamp_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    
+    # 2. Build unique Subject line and Custom Message-ID Header
+    subject = f"{SUBJECT_PREFIX} [{unique_id[:8]}] - #{i:04d}"
+    custom_message_id = f"<{unique_id}@{MAILBOX.split('@')[-1]}>"
 
     body = {
         "message": {
@@ -123,9 +115,9 @@ for i in range(1, COUNT + 1):
             "body": {
                 "contentType": "Text",
                 "content": (
-                    f"Automated Microsoft Graph Message Trace "
-                    f"test event #{i}.\n"
-                    f"Generated at: {datetime.now().isoformat()}"
+                    f"Automated Microsoft Graph Message Trace test event #{i}.\n"
+                    f"Unique Message ID : {unique_id}\n"
+                    f"Generated at UTC   : {timestamp_str}"
                 ),
             },
             "toRecipients": [
@@ -135,91 +127,57 @@ for i in range(1, COUNT + 1):
                     }
                 }
             ],
+            # Pass custom headers to enforce distinct InternetMessageId and tracking tags
+            "internetMessageHeaders": [
+                {
+                    "name": "X-Custom-Message-ID",
+                    "value": custom_message_id
+                },
+                {
+                    "name": "X-Test-Run-UUID",
+                    "value": unique_id
+                }
+            ]
         }
     }
 
     try:
-
-        response = requests.post(
-            send_url,
-            headers=headers,
-            json=body,
-            timeout=30
-        )
+        response = requests.post(send_url, headers=headers, json=body, timeout=30)
 
         if response.status_code == 202:
             successful += 1
-            print(
-                f"[{i}/{COUNT}] "
-                f"202 Accepted - {subject}"
-            )
+            print(f"[{i}/{COUNT}] 202 Accepted | UUID: {unique_id[:8]} | {subject}")
 
         elif response.status_code == 429:
-            print(
-                f"[{i}/{COUNT}] "
-                f"429 Throttled - waiting..."
-            )
-
-            retry_after = response.headers.get(
-                "Retry-After",
-                "60"
-            )
-
+            print(f"[{i}/{COUNT}] 429 Throttled - waiting...")
+            retry_after = response.headers.get("Retry-After", "60")
             try:
                 wait_seconds = int(retry_after)
             except ValueError:
                 wait_seconds = 60
 
-            print(
-                f"Waiting {wait_seconds} seconds "
-                f"before retry..."
-            )
-
+            print(f"Waiting {wait_seconds} seconds before retry...")
             time.sleep(wait_seconds)
 
-            # Retry same message
-            response = requests.post(
-                send_url,
-                headers=headers,
-                json=body,
-                timeout=30
-            )
+            # Retry sending the message
+            response = requests.post(send_url, headers=headers, json=body, timeout=30)
 
             if response.status_code == 202:
                 successful += 1
-                print(
-                    f"[{i}/{COUNT}] "
-                    f"202 Accepted after retry - {subject}"
-                )
+                print(f"[{i}/{COUNT}] 202 Accepted after retry - {subject}")
             else:
                 failed += 1
-                print(
-                    f"[{i}/{COUNT}] "
-                    f"Retry failed: "
-                    f"{response.status_code}"
-                )
-                print(response.text)
+                print(f"[{i}/{COUNT}] Retry failed: {response.status_code}\n{response.text}")
 
         else:
             failed += 1
-
-            print(
-                f"[{i}/{COUNT}] "
-                f"FAILED - HTTP {response.status_code}"
-            )
-
-            print(response.text)
+            print(f"[{i}/{COUNT}] FAILED - HTTP {response.status_code}\n{response.text}")
 
     except requests.RequestException as e:
-
         failed += 1
+        print(f"[{i}/{COUNT}] REQUEST ERROR: {e}")
 
-        print(
-            f"[{i}/{COUNT}] "
-            f"REQUEST ERROR: {e}"
-        )
-
-    # Rate limiting
+    # Rate limiting sleep
     if i < COUNT:
         time.sleep(DELAY)
 
